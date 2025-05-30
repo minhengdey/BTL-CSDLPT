@@ -1,11 +1,15 @@
 # Môi trường ảo
 venv/
+.venv/
+
 
 # File dữ liệu lớn
 ratings.dat
+test_data.dat
 
 # File cấu hình thực tế (nếu chứa thông tin nhạy cảm)
 config.ini
+
 
 # Các file hệ thống/macOS/Windows có thể thêm tùy
 .DS_Store
