@@ -10,7 +10,7 @@ RROBIN_TABLE_PREFIX = 'rrobin_part'
 USER_ID_COLNAME = 'userid'
 MOVIE_ID_COLNAME = 'movieid'
 RATING_COLNAME = 'rating'
-INPUT_FILE_PATH = 'test_data.dat'
+INPUT_FILE_PATH = 'ratings.dat'
 ACTUAL_ROWS_IN_INPUT_FILE = 10000054  # Number of lines in the input file
 
 import psycopg2

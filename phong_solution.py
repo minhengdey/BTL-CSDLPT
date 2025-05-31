@@ -11,7 +11,7 @@ RROBIN_TABLE_PREFIX = 'rrobin_part'
 USER_ID_COLNAME = 'userid'
 MOVIE_ID_COLNAME = 'movieid'
 RATING_COLNAME = 'rating'
-INPUT_FILE_PATH = 'test_data.dat'
+INPUT_FILE_PATH = 'ratings.dat'
 
 
 # =============================== PHẦN TỰ CODE ===============================
@@ -116,7 +116,7 @@ import psycopg2
 DATABASE_NAME = 'dds_assgn1'
 
 
-def getopenconnection(user='postgres', password='phonggda123', dbname='dds_assgn1'):
+def getopenconnection(user='postgres', password='minhanh2722004', dbname='dds_assgn1'):
     return psycopg2.connect("dbname='" + dbname + "' user='" + user + "' host='localhost' password='" + password + "'")
 
 
