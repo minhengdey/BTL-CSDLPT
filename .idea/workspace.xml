@@ -6,9 +6,7 @@
   <component name="ChangeListManager">
     <list default="true" id="7ee46297-ad4c-4dc1-873e-05e2e611c88e" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Assignment1Tester.py" beforeDir="false" afterPath="$PROJECT_DIR$/Assignment1Tester.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/phong_solution.py" beforeDir="false" afterPath="$PROJECT_DIR$/phong_solution.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/testHelper.py" beforeDir="false" afterPath="$PROJECT_DIR$/testHelper.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -31,18 +29,18 @@
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
     <option name="RESET_MODE" value="HARD" />
   </component>
-  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
-  "lastFilter": {
-    "state": "OPEN",
-    "assignee": "minhengdey"
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;minhengdey&quot;
   }
-}]]></component>
-  <component name="GithubPullRequestsUISettings"><![CDATA[{
-  "selectedUrlAndAccountId": {
-    "url": "https://github.com/minhengdey/BTL-CSDLPT.git",
-    "accountId": "5112ad41-9c37-4a4c-b629-bd4baf52ac67"
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/minhengdey/BTL-CSDLPT.git&quot;,
+    &quot;accountId&quot;: &quot;5112ad41-9c37-4a4c-b629-bd4baf52ac67&quot;
   }
-}]]></component>
+}</component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 2
 }</component>
@@ -67,6 +65,9 @@
     "node.js.selected.package.eslint": "(autodetect)",
     "node.js.selected.package.tslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
+    "project.structure.last.edited": "Modules",
+    "project.structure.proportion": "0.0",
+    "project.structure.side.proportion": "0.42413792",
     "settings.editor.selected.configurable": "preferences.fileTypes",
     "vue.rearranger.settings.migration": "true"
   }
@@ -96,6 +97,7 @@
       <workItem from="1748619933110" duration="329000" />
       <workItem from="1748620277893" duration="710000" />
       <workItem from="1748677552657" duration="985000" />
+      <workItem from="1748689786883" duration="2335000" />
     </task>
     <servers />
   </component>

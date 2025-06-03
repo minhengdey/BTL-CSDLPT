@@ -4,7 +4,7 @@ from psycopg2 import sql, extras
 from configparser import ConfigParser
 import argparse
 
-BATCH_SIZE = 10000
+BATCH_SIZE = 1000
 
 RANGE_TABLE_PREFIX = 'range_part'
 RROBIN_TABLE_PREFIX = 'rrobin_part'
@@ -104,36 +104,89 @@ def rangeinsert(ratingstablename, userid, itemid, rating, openconnection):
     cur.close()
     con.commit()
 
-# =============================== PHẦN FILE GỐC ===============================
-
-# !/usr/bin/python2.7
-#
-# Interface for the assignement
-#
-
 import psycopg2
 
 DATABASE_NAME = 'dds_assgn1'
 
+def create_db(dbname):
+    """
+    We create a DB by connecting to the default user and database of Postgres
+    The function first checks if an existing database exists for a given name, else creates it.
+    :return:None
+    """
+    # Connect to the default database
+    con = getopenconnection(dbname=dbname)
+    con.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = con.cursor()
+
+    # Check if an existing database with the same name exists
+    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % (dbname,))
+    count = cur.fetchone()[0]
+    if count == 0:
+        cur.execute('CREATE DATABASE %s' % (dbname,))  # Create the database
+    else:
+        print('A database named {0} already exists'.format(dbname))
+
+    # Clean up
+    cur.close()
+    con.commit()
+    
 
 def getopenconnection(user='postgres', password='minhanh2722004', dbname='dds_assgn1'):
     return psycopg2.connect("dbname='" + dbname + "' user='" + user + "' host='localhost' password='" + password + "'")
 
 
-def loadratings(ratingstablename, ratingsfilepath, openconnection):
+def loadratings(ratingstablename, ratingsfilepath, openconnection): 
     """
     Function to load data in @ratingsfilepath file to a table called @ratingstablename.
     """
+
+    print(f"Starting load from {ratingsfilepath}")
+
     create_db(DATABASE_NAME)
+
+    # 1) Kết nối DB
     con = openconnection
     cur = con.cursor()
-    cur.execute(
-        "create table " + ratingstablename + "(userid integer, extra1 char, movieid integer, extra2 char, rating float, extra3 char, timestamp bigint);")
-    cur.copy_from(open(ratingsfilepath), ratingstablename, sep=':')
-    cur.execute(
-        "alter table " + ratingstablename + " drop column extra1, drop column extra2, drop column extra3, drop column timestamp;")
+
+    # 2) Tạo bảng Ratings
+    cur.execute("create table " + ratingstablename + "(userid integer, extra1 char, movieid integer, extra2 char, rating float, extra3 char, timestamp bigint);")
+    con.commit()
+
+    # 3) Chuẩn bị batch-insert với ON CONFLICT để bỏ qua duplicate
+    insert_q = sql.SQL(
+        "INSERT INTO " +  ratingstablename + "(userid, movieid, rating) VALUES %s ON CONFLICT DO NOTHING"
+    )
+
+    # 4) Đọc file và insert theo batch
+    with open(ratingsfilepath, 'r', encoding='utf-8') as f:
+        reader = csv.reader((line.replace('::', ',') for line in f), delimiter=',')
+        batch = []
+        for idx, row in enumerate(reader, 1):
+            try:
+                user, movie, rating, *_ = row
+                batch.append((int(user), int(movie), float(rating)))
+            except Exception as e:
+                print(f"[Line {idx}] parse error: {e}")
+                continue
+
+            if len(batch) >= BATCH_SIZE:
+                extras.execute_values(cur, insert_q, batch)
+                con.commit()
+                batch.clear()
+
+        if batch:
+            extras.execute_values(cur, insert_q, batch)
+            con.commit()
+    
+    cur.execute("alter table " + ratingstablename + " drop column extra1, drop column extra2, drop column extra3, drop column timestamp;")
+    con.commit()
+
+    # 5) Đóng kết nối
     cur.close()
     con.commit()
+
+    print("Finished loading ratings.")
 
 
 # def rangepartition(ratingstablename, numberofpartitions, openconnection):
@@ -260,31 +313,6 @@ def roundrobininsert(ratingstablename, userid, itemid, rating, openconnection):
 #         itemid) + "," + str(rating) + ");")
 #     cur.close()
 #     con.commit()
-
-
-def create_db(dbname):
-    """
-    We create a DB by connecting to the default user and database of Postgres
-    The function first checks if an existing database exists for a given name, else creates it.
-    :return:None
-    """
-    # Connect to the default database
-    con = getopenconnection(dbname='postgres')
-    con.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-    cur = con.cursor()
-
-    # Check if an existing database with the same name exists
-    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % (dbname,))
-    count = cur.fetchone()[0]
-    if count == 0:
-        cur.execute('CREATE DATABASE %s' % (dbname,))  # Create the database
-    else:
-        print('A database named {0} already exists'.format(dbname))
-
-    # Clean up
-    cur.close()
-    con.close()
-
 
 def count_partitions(prefix, openconnection):
     """
