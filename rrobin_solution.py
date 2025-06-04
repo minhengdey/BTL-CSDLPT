@@ -5,7 +5,6 @@ import csv
 import time
 import psycopg2
 from psycopg2 import sql
-import multiprocessing as mp
 
 # =============================== CẤU HÌNH CHUNG ===============================
 BATCH_SIZE               = 10000
@@ -209,7 +208,8 @@ def roundrobininsert(ratingstablename, userid, movieid, rating, openconnection):
     partition_number = cur.fetchone()[0]
     
     # Lấy tổng số lượng bản ghi hiện có từ bảng gốc.
-    total_rows = 0
+    cur.execute(f"SELECT COUNT(*) FROM {ratingstablename}")
+    total_rows = cur.fetchone()[0]
 
     # Xác định phân mảnh sẽ chứa bản ghi mới
     partition_index = total_rows % partition_number
