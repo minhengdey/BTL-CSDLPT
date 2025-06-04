@@ -95,7 +95,12 @@ def loadratings(ratingstablename, ratingsfilepath, openconnection):
 
 
 # =============================== 1. round robin partition ===============================
+import time
 
+
+
+# Số lượng bản ghi đọc một lần (nếu muốn batch)
+BATCH_SIZE = 1000
 # ---------------------------------------------------
 
 def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
@@ -141,8 +146,7 @@ def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
             part_index = row_index % numberofpartitions
             tuple_inserts[part_index].append(f"({row[0]}, {row[1]}, {row[2]})")
             row_index += 1
-            if(row_index % 100000 == 0):
-                print(f"Processing row {row_index} for partition {part_index}")
+ 
 
         # Đọc batch tiếp
         batch = cur.fetchmany(BATCH_SIZE)
