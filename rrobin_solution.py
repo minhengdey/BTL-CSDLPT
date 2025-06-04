@@ -4,6 +4,7 @@ import os
 import csv
 import time
 from psycopg2 import sql
+from psycopg2.extras import execute_batch
 
 # =============================== CẤU HÌNH CHUNG ===============================
 BATCH_SIZE               = 10000000
@@ -99,10 +100,6 @@ import time
 
 
 
-# Số lượng bản ghi đọc một lần (nếu muốn batch)
-BATCH_SIZE = 1000
-# ---------------------------------------------------
-
 def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
     """
     Phân chia theo Round-Robin: bản ghi i sẽ vào partition (i % numberofpartitions).
@@ -144,7 +141,7 @@ def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
 
         for row in batch:
             part_index = row_index % numberofpartitions
-            tuple_inserts[part_index].append(f"({row[0]}, {row[1]}, {row[2]})")
+            tuple_inserts[part_index].append((row[0], row[1], row[2]))
             row_index += 1
  
 
@@ -152,12 +149,10 @@ def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
         batch = cur.fetchmany(BATCH_SIZE)
     for i in range(numberofpartitions):
         if(tuple_inserts[i]):
-            insert_query = f"""INSERT INTO 
-            {RROBIN_TABLE_PREFIX}{i} (userid, movieid, rating) VALUES 
-            {",".join(tuple_inserts[i])};
-            """  
-            insert_cur.execute(insert_query)
-
+            batchinsert(f"{RROBIN_TABLE_PREFIX}{i}",
+                       ('userid', 'movieid', 'rating'),
+                       tuple_inserts[i],
+                       BATCH_SIZE, insert_cur)
     # 4. Commit và đóng cursor
     conn.commit()
     cur.close()
@@ -167,7 +162,17 @@ def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
     print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds. "
           f"Total rows processed: {total_rows}")
 
+def batchinsert(tableName, columnTuples, dataTuples, batchSize, insertcur):
+    for i in range(0, len(dataTuples), batchSize):
+        batch = dataTuples[i:min(i + batchSize, len(dataTuples))]
+        values_str = ", ".join(
+            "(" + ", ".join(map(str, row)) + ")"
+            for row in batch)
+        insert_query = f"""INSERT INTO {tableName} ({', '.join(columnTuples)}) 
+                           VALUES {values_str} """
+        insertcur.execute(insert_query)
 
+    
 
 # =============================== 5. roundrobininsert ===============================
 def roundrobininsert(ratingstablename, userid, movieid, rating, openconnection):
