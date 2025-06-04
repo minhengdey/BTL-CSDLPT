@@ -3,15 +3,12 @@
 import os
 import csv
 import time
-import psycopg2
 from psycopg2 import sql
-import multiprocessing as mp
 
 # =============================== CẤU HÌNH CHUNG ===============================
-BATCH_SIZE               = 10000
+BATCH_SIZE               = 10000000
 RANGE_TABLE_PREFIX       = 'range_part'
 RROBIN_TABLE_PREFIX      = 'rrobin_part'
-RROBIN_INSERT_SEQ        = 'rrobin_insert_seq'
 INPUT_FILE_PATH          = 'ratings.dat'
 
 # **Điền password Postgres của bạn ở đây** (phải khớp với testHelper.getopenconnection)
@@ -209,7 +206,8 @@ def roundrobininsert(ratingstablename, userid, movieid, rating, openconnection):
     partition_number = cur.fetchone()[0]
     
     # Lấy tổng số lượng bản ghi hiện có từ bảng gốc.
-    total_rows = 0
+    cur.execute(f"SELECT COUNT(*) FROM {ratingstablename}")
+    total_rows = cur.fetchone()[0]
 
     # Xác định phân mảnh sẽ chứa bản ghi mới
     partition_index = total_rows % partition_number
