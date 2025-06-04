@@ -4,6 +4,7 @@ import os
 import csv
 import time
 from psycopg2 import sql
+from psycopg2.extras import execute_batch
 
 # =============================== CẤU HÌNH CHUNG ===============================
 BATCH_SIZE               = 10000000
@@ -99,10 +100,6 @@ import time
 
 
 
-# Số lượng bản ghi đọc một lần (nếu muốn batch)
-BATCH_SIZE = 1000
-# ---------------------------------------------------
-
 def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
     """
     Phân chia theo Round-Robin: bản ghi i sẽ vào partition (i % numberofpartitions).
@@ -113,8 +110,9 @@ def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
     cur = conn.cursor()
     insert_cur = conn.cursor()
     start = time.time()
+    
+    # 1. Tạo các partition 
 
-    # 1. Xoá (nếu có) và tạo mới các table partition
     for i in range(numberofpartitions):
         tbl = f"{RROBIN_TABLE_PREFIX}{i}"
         cur.execute(f"""
@@ -125,49 +123,56 @@ def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
             );
         """)
 
-    # 2. Lấy tổng số bản ghi (tuỳ chọn, chỉ để in log)
-    cur.execute(f"SELECT COUNT(*) FROM {ratingstablename};")
-    total_rows = cur.fetchone()[0]
-
-    # 3. Lấy lần lượt theo batch và chèn vào partition thích hợp
-    #    Sử dụng i_row để tính index partition: part_index = i_row % numberofpartitions
+    # 3. Lần lượt đọc từng hàng theo batch từ bảng gốc ratingstablename
     cur.execute(f"SELECT userid, movieid, rating FROM {ratingstablename};")
     row_index = 0
     batch = cur.fetchmany(BATCH_SIZE)
     
-    
+    # Khởi tạo danh sách để chứa các hàng sẽ chèn vào từng partition
+    # Mỗi phần tử là một danh sách chứa các tuple (userid, movieid, rating) cho từng partition
     tuple_inserts = [[] for _ in range(numberofpartitions)]
 
     while batch:
-        # Tập hợp các hàng cho từng partition trong batch này
-        # Tạo dict mapping part_index -> list of rows
-
+        # Duyệt qua từng hàng trong batch và phân bổ vào các partition theo round-robin
+        # row_index % numberofpartitions sẽ xác định partition nào sẽ nhận hàng này
+        # Mỗi hàng sẽ được chèn vào partition tương ứng với chỉ số của nó
+        # theo round-robin
         for row in batch:
             part_index = row_index % numberofpartitions
-            tuple_inserts[part_index].append(f"({row[0]}, {row[1]}, {row[2]})")
+            tuple_inserts[part_index].append((row[0], row[1], row[2]))
             row_index += 1
- 
-
-        # Đọc batch tiếp
+            
+        # Lấy batch tiếp theo
         batch = cur.fetchmany(BATCH_SIZE)
+        
+    # Thực hiện batch insert vào từng partition
     for i in range(numberofpartitions):
         if(tuple_inserts[i]):
-            insert_query = f"""INSERT INTO 
-            {RROBIN_TABLE_PREFIX}{i} (userid, movieid, rating) VALUES 
-            {",".join(tuple_inserts[i])};
-            """  
-            insert_cur.execute(insert_query)
-
+            batchinsert(f"{RROBIN_TABLE_PREFIX}{i}",
+                       ('userid', 'movieid', 'rating'),
+                       tuple_inserts[i],
+                       BATCH_SIZE, insert_cur)
+            
+            
     # 4. Commit và đóng cursor
     conn.commit()
     cur.close()
     insert_cur.close()
 
     end = time.time()
-    print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds. "
-          f"Total rows processed: {total_rows}")
+    print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds.")
 
+def batchinsert(tableName, columnTuples, dataTuples, batchSize, insertcur):
+    for i in range(0, len(dataTuples), batchSize):
+        batch = dataTuples[i:min(i + batchSize, len(dataTuples))]
+        values_str = ", ".join(
+            "(" + ", ".join(map(str, row)) + ")"
+            for row in batch)
+        insert_query = f"""INSERT INTO {tableName} ({', '.join(columnTuples)}) 
+                           VALUES {values_str} """
+        insertcur.execute(insert_query)
 
+    
 
 # =============================== 5. roundrobininsert ===============================
 def roundrobininsert(ratingstablename, userid, movieid, rating, openconnection):
