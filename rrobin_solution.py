@@ -95,100 +95,74 @@ def loadratings(ratingstablename, ratingsfilepath, openconnection):
 
 
 # =============================== 1. round robin partition ===============================
+
+# ---------------------------------------------------
+
 def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
+    """
+    Phân chia theo Round-Robin: bản ghi i sẽ vào partition (i % numberofpartitions).
+    Tạo numberofpartitions table với tên: RROBIN_TABLE_PREFIX + idx.
+    Giả sử các table partition chưa tồn tại, nếu đã có, ta sẽ xóa sạch trước.
+    """
     conn = openconnection
     cur = conn.cursor()
     insert_cur = conn.cursor()
     start = time.time()
-    
-    # Khởi tạo các partition
+
+    # 1. Xoá (nếu có) và tạo mới các table partition
     for i in range(numberofpartitions):
-        cur.execute(("""
-                            
-            CREATE TABLE IF NOT EXISTS {} (
+        tbl = f"{RROBIN_TABLE_PREFIX}{i}"
+        cur.execute(f"""
+            CREATE TABLE {tbl} (
                 userid  INTEGER,
                 movieid INTEGER,
                 rating  REAL
             );
-        """).format((f"{RROBIN_TABLE_PREFIX}{i}")))
+        """)
 
-    # Lấy tổng số lượng bản ghi trong bảng gốc
-    cur.execute((f"SELECT COUNT(*) FROM {ratingstablename}"))
+    # 2. Lấy tổng số bản ghi (tuỳ chọn, chỉ để in log)
+    cur.execute(f"SELECT COUNT(*) FROM {ratingstablename};")
     total_rows = cur.fetchone()[0]
-    
-    # Khởi tạo các biến số để phân chia bản ghi vào các partition
-    
-    # Số lượng bản ghi tối thiểu mỗi phần
-    min_rows_per_part = total_rows // numberofpartitions
-    
-    # Biến để theo dõi số lượng bản ghi đã chèn vào mỗi phần
-    part_row_count = 0
-    
-    # Biến để theo dõi chỉ số phần hiện tại
-    part_index = 0
-    
-    # Lấy tất cả các bản ghi từ bảng gốc
-    cur.execute((f"SELECT userid, movieid, rating FROM {ratingstablename}"))
-    while True:
-        # Nếu đã đạt đến số lượng bản ghi tối thiểu cho phần hiện tại, 
-        # chuyển sang phần tiếp theo
-        if(part_row_count == min_rows_per_part):
-            part_row_count = 0
-            part_index += 1
-            # Nếu đã đạt đến số lượng phân mảnh, thoát khỏi vòng lặp
-            if part_index >= numberofpartitions:
-                break
-            continue
- 
-        # Lấy số lượng bản ghi tối đa có thể chèn vào phần hiện tại
-        # (tối đa là BATCH_SIZE hoặc số lượng bản ghi còn thiếu trong phần)
-        fetch_size = min(BATCH_SIZE, min_rows_per_part - part_row_count)
-        part_row_count += fetch_size
-        
-        rows = cur.fetchmany(fetch_size)
-        # Tạo câu lệnh SQL để insert nhiều bản ghi
-        if not rows:
-            break
-        sql_insert = (f"""
-            INSERT INTO {RROBIN_TABLE_PREFIX+str(part_index)} 
-            (userid, movieid, rating) 
-            VALUES
-        """)
-        for row in rows:
-            sql_insert += (f"""
-                ({row[0]}, {row[1]}, {row[2]}),
-            """)
-        # Loại bỏ dấu phẩy cuối cùng
-        sql_insert = sql_insert.rstrip().rstrip(',')
-        sql_insert += ";"
-        
-        # Thực hiện chèn bản ghi vào phân mảnh tương ứng
-        insert_cur.execute(sql_insert)
+
+    # 3. Lấy lần lượt theo batch và chèn vào partition thích hợp
+    #    Sử dụng i_row để tính index partition: part_index = i_row % numberofpartitions
+    cur.execute(f"SELECT userid, movieid, rating FROM {ratingstablename};")
+    row_index = 0
+    batch = cur.fetchmany(BATCH_SIZE)
     
     
-    # Thực hiện chèn các bản ghi còn lại nếu có
-    part_index = 0
-    while True:
-        row = cur.fetchone()
-        if not row:
-            break
-        insert_cur.execute(f"""                   
-            INSERT INTO {RROBIN_TABLE_PREFIX+str(part_index)}
-            (userid, movieid, rating)
-            VALUES ({row[0]}, {row[1]}, {row[2]});
-        """)
-        part_index += 1
-        
-        
-        
-    # Kết thúc transaction
+    tuple_inserts = [[] for _ in range(numberofpartitions)]
+
+    while batch:
+        # Tập hợp các hàng cho từng partition trong batch này
+        # Tạo dict mapping part_index -> list of rows
+
+        for row in batch:
+            part_index = row_index % numberofpartitions
+            tuple_inserts[part_index].append(f"({row[0]}, {row[1]}, {row[2]})")
+            row_index += 1
+            if(row_index % 100000 == 0):
+                print(f"Processing row {row_index} for partition {part_index}")
+
+        # Đọc batch tiếp
+        batch = cur.fetchmany(BATCH_SIZE)
+    for i in range(numberofpartitions):
+        if(tuple_inserts[i]):
+            insert_query = f"""INSERT INTO 
+            {RROBIN_TABLE_PREFIX}{i} (userid, movieid, rating) VALUES 
+            {",".join(tuple_inserts[i])};
+            """  
+            insert_cur.execute(insert_query)
+
+    # 4. Commit và đóng cursor
     conn.commit()
     cur.close()
     insert_cur.close()
 
-    # Lấy số đo thời gian
     end = time.time()
-    print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds.")
+    print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds. "
+          f"Total rows processed: {total_rows}")
+
 
 
 # =============================== 5. roundrobininsert ===============================
