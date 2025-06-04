@@ -51,7 +51,7 @@ def deleteAllPublicTables(openconnection):
 
     cur.close()
 
-def getopenconnection(user='postgres', password='minhanh2722004', dbname='dds_assgn1'):
+def getopenconnection(user='postgres', password='123456', dbname='dds_assgn1'):
     return psycopg2.connect("dbname='" + dbname + "' user='" + user + "' host='localhost' password='" + password + "'")
 
 
@@ -184,7 +184,6 @@ def testEachRoundrobinPartition(ratingstablename, n, openconnection, roundrobinp
                 roundrobinpartitiontableprefix, i, count, countList[i]
             ))
 
-# ##########
 
 def testloadratings(MyAssignment, ratingstablename, filepath, openconnection, rowsininpfile):
     """
@@ -230,7 +229,7 @@ def testrangepartition(MyAssignment, ratingstablename, n, openconnection, partit
         return [False, e]
 
 
-def testroundrobinpartition(MyAssignment, ratingstablename, numberofpartitions, openconnection,
+def     testroundrobinpartition(MyAssignment, ratingstablename, numberofpartitions, openconnection,
                             partitionstartindex, ACTUAL_ROWS_IN_INPUT_FILE):
     """
     Tests the round robin partitioning for Completness, Disjointness and Reconstruction
