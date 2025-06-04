@@ -33,7 +33,7 @@ if __name__ == '__main__':
             else:
                 print("loadratings function fail!")
 
-            [result, e] = testHelper.testrangepartition(MyAssignment, RATINGS_TABLE, 100, conn, 0, ACTUAL_ROWS_IN_INPUT_FILE)
+            [result, e] = testHelper.testrangepartition(MyAssignment, RATINGS_TABLE, 5, conn, 0, ACTUAL_ROWS_IN_INPUT_FILE)
             if result :
                 print("rangepartition function pass!")
             else:

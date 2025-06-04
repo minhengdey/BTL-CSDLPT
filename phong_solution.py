@@ -103,7 +103,7 @@ def loadratings(ratingstablename, ratingsfilepath, openconnection):
 # =============================== 2. rangepartition (parallel) ===============================
 def _range_worker(args):
     """
-    Worker cho partition i: tạo/truncate bảng range_part{i}, 
+    Worker cho partition i: tạo/truncate bảng range_part{i},
     rồi INSERT ... SELECT WHERE rating ∈ [min,max].
     args = (i, ratingstablename, numberofpartitions, conn_info)
     """
@@ -136,8 +136,13 @@ def _range_worker(args):
 
     # Tính khoảng giá trị
     delta = 5.0 / numberofpartitions
-    min_val = i * delta
+    min_val = 0.0
+    for _ in range(i):
+        min_val += delta
     max_val = min_val + delta
+    print(i, min_val, max_val)
+    if (i == numberofpartitions - 1) :
+        max_val = 5.0
 
     if i == 0:
         where_clause = "rating >= %s AND rating <= %s"
