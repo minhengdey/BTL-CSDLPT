@@ -2,6 +2,7 @@
 venv/
 .venv/
 
+__pycache__/
 
 # File dữ liệu lớn
 ratings.dat

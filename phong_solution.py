@@ -1,327 +1,353 @@
+# phong_solution.py
+
+import os
 import csv
+import time
 import psycopg2
-from psycopg2 import sql, extras
-from configparser import ConfigParser
-import argparse
+from psycopg2 import sql
+import multiprocessing as mp
 
-BATCH_SIZE = 1000
+# =============================== CẤU HÌNH CHUNG ===============================
+BATCH_SIZE               = 10000
+RANGE_TABLE_PREFIX       = 'range_part'
+RROBIN_TABLE_PREFIX      = 'rrobin_part'
+RROBIN_INSERT_SEQ        = 'rrobin_insert_seq'
+INPUT_FILE_PATH          = 'ratings.dat'
 
-RANGE_TABLE_PREFIX = 'range_part'
-RROBIN_TABLE_PREFIX = 'rrobin_part'
-USER_ID_COLNAME = 'userid'
-MOVIE_ID_COLNAME = 'movieid'
-RATING_COLNAME = 'rating'
-INPUT_FILE_PATH = 'ratings.dat'
+# **Điền password Postgres của bạn ở đây** (phải khớp với testHelper.getopenconnection)
+DB_PASSWORD              = 'minhanh2722004'
 
 
-# =============================== PHẦN TỰ CODE ===============================
+# =============================== HÀM TIỆN ÍCH CHUNG ===============================
+def _preprocess_raw_to_csv(raw_path, csv_path):
+    """
+    Đọc file raw (delimiter='::'), ghi ra CSV (delimiter=',') chỉ giữ 3 cột đầu:
+    userid, movieid, rating.
+    """
+    with open(raw_path, 'r', encoding='utf-8') as fin, \
+         open(csv_path, 'w', encoding='utf-8', newline='') as fout:
+        writer = csv.writer(fout)
+        for line in fin:
+            parts = line.strip().split("::")
+            if len(parts) < 3:
+                continue
+            writer.writerow([parts[0], parts[1], parts[2]])
+
+
+def _count_partitions(prefix, openconnection):
+    """
+    Đếm số bảng có tên giống prefix + '%'.
+    """
+    cur = openconnection.cursor()
+    cur.execute("""
+        SELECT COUNT(*)
+          FROM pg_catalog.pg_tables
+         WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+           AND tablename LIKE %s;
+    """, (prefix + '%',))
+    cnt = cur.fetchone()[0]
+    cur.close()
+    return cnt
+
+
+# =============================== 1. loadratings ===============================
+def loadratings(ratingstablename, ratingsfilepath, openconnection):
+    """
+    Tạo table ratingstablename (userid INT, movieid INT, rating REAL),
+    sau đó bulk‐load (~10M rows) với COPY. Dữ liệu gốc ở ratingsfilepath
+    có delimiter '::'; ta sẽ chuyển thành CSV tạm rồi COPY.
+    """
+    conn = openconnection
+    cur = conn.cursor()
+    temp_csv = ratingstablename + '_temp.csv'
+
+    start = time.time()
+
+    # 1) Nếu đã có table thì DROP (để testHelper tạo lại clean)
+    cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(ratingstablename)))
+    conn.commit()
+
+    # 2) Tạo table mới
+    cur.execute(sql.SQL("""
+        CREATE TABLE {} (
+            userid  INTEGER NOT NULL,
+            movieid INTEGER NOT NULL,
+            rating  REAL    NOT NULL
+        );
+    """).format(sql.Identifier(ratingstablename)))
+    conn.commit()
+
+    # 3) Preprocess raw '::' → CSV
+    _preprocess_raw_to_csv(ratingsfilepath, temp_csv)
+
+    # 4) COPY từ CSV vào table
+    with open(temp_csv, 'r', encoding='utf-8') as f:
+        cur.copy_expert(
+            sql=f"COPY {ratingstablename}(userid, movieid, rating) FROM STDIN WITH (FORMAT csv)",
+            file=f
+        )
+    conn.commit()
+
+    # 5) Xóa file tạm
+    try:
+        os.remove(temp_csv)
+    except OSError:
+        pass
+
+    end = time.time()
+    print(f"[loadratings] Completed in {end - start:.2f} seconds.")
+
+    cur.close()
+
+
+# =============================== 2. rangepartition (parallel) ===============================
+def _range_worker(args):
+    """
+    Worker cho partition i: tạo/truncate bảng range_part{i}, 
+    rồi INSERT ... SELECT WHERE rating ∈ [min,max].
+    args = (i, ratingstablename, numberofpartitions, conn_info)
+    """
+    i, ratingstablename, numberofpartitions, conn_info = args
+    conn = psycopg2.connect(**conn_info)
+    cur = conn.cursor()
+
+    part_name = f"{RANGE_TABLE_PREFIX}{i}"
+    # Tạo hoặc TRUNCATE
+    cur.execute("""
+        SELECT EXISTS (
+          SELECT 1
+            FROM pg_catalog.pg_tables
+           WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+             AND tablename = %s
+        );
+    """, (part_name,))
+    exists = cur.fetchone()[0]
+    if exists:
+        cur.execute(sql.SQL("TRUNCATE TABLE {}").format(sql.Identifier(part_name)))
+    else:
+        cur.execute(sql.SQL("""
+            CREATE TABLE {} (
+                userid  INTEGER,
+                movieid INTEGER,
+                rating  REAL
+            );
+        """).format(sql.Identifier(part_name)))
+    conn.commit()
+
+    # Tính khoảng giá trị
+    delta = 5.0 / numberofpartitions
+    min_val = i * delta
+    max_val = min_val + delta
+
+    if i == 0:
+        where_clause = "rating >= %s AND rating <= %s"
+    else:
+        where_clause = "rating > %s AND rating <= %s"
+
+    query = sql.SQL("""
+        INSERT INTO {} (userid, movieid, rating)
+        SELECT userid, movieid, rating
+          FROM {}
+         WHERE {}
+    """).format(
+        sql.Identifier(part_name),
+        sql.Identifier(ratingstablename),
+        sql.SQL(where_clause)
+    )
+    cur.execute(query, (min_val, max_val))
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
 
 def rangepartition(ratingstablename, numberofpartitions, openconnection):
-    conn = openconnection
-    cur = conn.cursor()
+    """
+    Tạo numberofpartitions bảng range_part0..range_part{n-1} và
+    phân chia dữ liệu từ ratingstablename dựa trên rating ∈ [0,5].
+    Thực hiện song song bằng multiprocessing.
+    """
+    # Lấy tham số kết nối (tham chiếu tới DB) từ openconnection
+    dsn_params = openconnection.get_dsn_parameters()
+    conn_info = {
+        'dbname':   dsn_params['dbname'],
+        'user':     dsn_params['user'],
+        'password': DB_PASSWORD,
+        'host':     dsn_params.get('host', 'localhost'),
+        'port':     dsn_params.get('port', '5432')
+    }
+    # **Không đóng openconnection** ở đây, để testHelper có thể tiếp tục sử dụng.
 
-    delta = 5 / numberofpartitions
-    RANGE_TABLE_PREFIX = 'range_part'
+    args_list = [
+        (i, ratingstablename, numberofpartitions, conn_info)
+        for i in range(numberofpartitions)
+    ]
 
-    for i in range(numberofpartitions):
-        minRange = i * delta
-        maxRange = minRange + delta
-        table_name = RANGE_TABLE_PREFIX + str(i)
+    start = time.time()
+    num_workers = min(numberofpartitions, mp.cpu_count())
+    with mp.Pool(processes=num_workers) as pool:
+        pool.map(_range_worker, args_list)
+    end = time.time()
 
-        # Tạo bảng con
-        cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS {table_name} (
-                userid INTEGER,
-                movieid INTEGER,
-                rating FLOAT
-            );
-        """)
+    print(f"[rangepartition] Completed in {end - start:.2f} seconds.")
 
-        # Tạo điều kiện lọc
-        if i == 0:
-            condition = f"rating >= {minRange} AND rating <= {maxRange}"
-        else:
-            condition = f"rating > {minRange} AND rating <= {maxRange}"
 
-        # Truy vấn toàn bộ dữ liệu phù hợp
-        cur.execute(f"""
-            SELECT userid, movieid, rating 
-            FROM {ratingstablename}
-            WHERE {condition};
-        """)
-
-        rows = cur.fetchall()
-
-        # Nếu không có dòng nào thì bỏ qua
-        if not rows:
-            continue
-
-        sql_insert_prefix = f"""
-            INSERT INTO {table_name} (userid, movieid, rating) VALUES
-        """
-
-        count = 0
-        values_batch = ""
-
-        for row in rows:
-            values_batch += f"({row[0]}, {row[1]}, {row[2]}),"
-            count += 1
-
-            if count == BATCH_SIZE:
-                sql = sql_insert_prefix + values_batch.rstrip(',') + ";"
-                cur.execute(sql)
-                count = 0
-                values_batch = ""
-
-        # Chèn phần dư còn lại
-        if count > 0:
-            sql = sql_insert_prefix + values_batch.rstrip(',') + ";"
-            cur.execute(sql)
-
-    cur.close()
-    conn.commit()
-
+# =============================== 3. rangeinsert ===============================
 def rangeinsert(ratingstablename, userid, itemid, rating, openconnection):
-    con = openconnection
-    cur = con.cursor()
-    RANGE_TABLE_PREFIX = 'range_part'
+    """
+    Chèn một record mới vào đúng bảng range_partX dựa trên rating.
+    """
+    conn = openconnection
+    cur = conn.cursor()
 
-    cur.execute("""
-        SELECT COUNT(*) 
-        FROM pg_catalog.pg_tables
-        WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-        AND tablename LIKE %s;
-    """, (RANGE_TABLE_PREFIX + '%',))
-    partition_number = cur.fetchone()[0]
+    num_parts = _count_partitions(RANGE_TABLE_PREFIX, conn)
+    if num_parts == 0:
+        cur.close()
+        return
 
-    delta = 5 / partition_number
-    index = int(rating / delta)
-    if rating % delta == 0 and index != 0:
-        index = index - 1
-    table_name = RANGE_TABLE_PREFIX + str(index)
-    cur.execute("insert into " + table_name + "(userid, movieid, rating) values (" + str(userid) + "," + str(
-        itemid) + "," + str(rating) + ");")
+    delta = 5.0 / num_parts
+    idx = int(rating / delta)
+    if (rating % delta == 0) and (idx != 0):
+        idx -= 1
+    part_table = f"{RANGE_TABLE_PREFIX}{idx}"
+
+    cur.execute(sql.SQL("""
+        INSERT INTO {} (userid, movieid, rating)
+        VALUES (%s, %s, %s)
+    """).format(sql.Identifier(part_table)),
+    (userid, itemid, rating))
+    conn.commit()
     cur.close()
-    con.commit()
 
-import psycopg2
 
-DATABASE_NAME = 'dds_assgn1'
-
-def create_db(dbname):
+# =============================== 4. roundrobinpartition (parallel) ===============================
+def _rrobin_worker(args):
     """
-    We create a DB by connecting to the default user and database of Postgres
-    The function first checks if an existing database exists for a given name, else creates it.
-    :return:None
+    Worker cho partition i: tạo/truncate bảng rrobin_part{i}, 
+    rồi INSERT ... SELECT với modulo (ROW_NUMBER()).
+    args = (i, ratingstablename, numberofpartitions, conn_info)
     """
-    # Connect to the default database
-    con = getopenconnection(dbname=dbname)
-    con.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-    cur = con.cursor()
+    i, ratingstablename, numberofpartitions, conn_info = args
+    conn = psycopg2.connect(**conn_info)
+    cur = conn.cursor()
 
-    # Check if an existing database with the same name exists
-    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % (dbname,))
-    count = cur.fetchone()[0]
-    if count == 0:
-        cur.execute('CREATE DATABASE %s' % (dbname,))  # Create the database
+    part_name = f"{RROBIN_TABLE_PREFIX}{i}"
+    # Tạo hoặc TRUNCATE
+    cur.execute("""
+        SELECT EXISTS (
+          SELECT 1
+            FROM pg_catalog.pg_tables
+           WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+             AND tablename = %s
+        );
+    """, (part_name,))
+    exists = cur.fetchone()[0]
+    if exists:
+        cur.execute(sql.SQL("TRUNCATE TABLE {}").format(sql.Identifier(part_name)))
     else:
-        print('A database named {0} already exists'.format(dbname))
-
-    # Clean up
-    cur.close()
-    con.commit()
-    
-
-def getopenconnection(user='postgres', password='minhanh2722004', dbname='dds_assgn1'):
-    return psycopg2.connect("dbname='" + dbname + "' user='" + user + "' host='localhost' password='" + password + "'")
-
-
-def loadratings(ratingstablename, ratingsfilepath, openconnection): 
-    """
-    Function to load data in @ratingsfilepath file to a table called @ratingstablename.
-    """
-
-    print(f"Starting load from {ratingsfilepath}")
-
-    create_db(DATABASE_NAME)
-
-    # 1) Kết nối DB
-    con = openconnection
-    cur = con.cursor()
-
-    # 2) Tạo bảng Ratings
-    cur.execute("create table " + ratingstablename + "(userid integer, extra1 char, movieid integer, extra2 char, rating float, extra3 char, timestamp bigint);")
-    con.commit()
-
-    # 3) Chuẩn bị batch-insert với ON CONFLICT để bỏ qua duplicate
-    insert_q = sql.SQL(
-        "INSERT INTO " +  ratingstablename + "(userid, movieid, rating) VALUES %s ON CONFLICT DO NOTHING"
-    )
-
-    # 4) Đọc file và insert theo batch
-    with open(ratingsfilepath, 'r', encoding='utf-8') as f:
-        reader = csv.reader((line.replace('::', ',') for line in f), delimiter=',')
-        batch = []
-        for idx, row in enumerate(reader, 1):
-            try:
-                user, movie, rating, *_ = row
-                batch.append((int(user), int(movie), float(rating)))
-            except Exception as e:
-                print(f"[Line {idx}] parse error: {e}")
-                continue
-
-            if len(batch) >= BATCH_SIZE:
-                extras.execute_values(cur, insert_q, batch)
-                con.commit()
-                batch.clear()
-
-        if batch:
-            extras.execute_values(cur, insert_q, batch)
-            con.commit()
-    
-    cur.execute("alter table " + ratingstablename + " drop column extra1, drop column extra2, drop column extra3, drop column timestamp;")
-    con.commit()
-
-    # 5) Đóng kết nối
-    cur.close()
-    con.commit()
-
-    print("Finished loading ratings.")
-
-
-# def rangepartition(ratingstablename, numberofpartitions, openconnection):
-#     """
-#     Function to create partitions of main table based on range of ratings.
-#     """
-#     con = openconnection
-#     cur = con.cursor()
-#     delta = 5 / numberofpartitions
-#     RANGE_TABLE_PREFIX = 'range_part'
-#     for i in range(0, numberofpartitions):
-#         minRange = i * delta
-#         maxRange = minRange + delta
-#         table_name = RANGE_TABLE_PREFIX + str(i)
-#         cur.execute("create table " + table_name + " (userid integer, movieid integer, rating float);")
-#         if i == 0:
-#             cur.execute(
-#                 "insert into " + table_name + " (userid, movieid, rating) select userid, movieid, rating from " + ratingstablename + " where rating >= " + str(
-#                     minRange) + " and rating <= " + str(maxRange) + ";")
-#         else:
-#             cur.execute(
-#                 "insert into " + table_name + " (userid, movieid, rating) select userid, movieid, rating from " + ratingstablename + " where rating > " + str(
-#                     minRange) + " and rating <= " + str(maxRange) + ";")
-#     cur.close()
-#     con.commit()
-
-
-def roundrobinpartition(ratingstablename, numberofpatitrions, openconnection):
-    conn = openconnection
-    cur = conn.cursor()
-
-    for i in range(numberofpatitrions):
-        # Tạo phân mảnh thứ i.
-        cur.execute(f"""
-            CREATE TABLE {RROBIN_TABLE_PREFIX}{i} (
-                {USER_ID_COLNAME} INTEGER,
-                {MOVIE_ID_COLNAME} INTEGER,
-                {RATING_COLNAME} FLOAT
+        cur.execute(sql.SQL("""
+            CREATE TABLE {} (
+                userid  INTEGER,
+                movieid INTEGER,
+                rating  REAL
             );
-        """)
-
-        # Lấy các bản ghi từ bảng gốc ứng với phân mảnh thứ i
-        cur.execute(f"""
-            SELECT {USER_ID_COLNAME}, {MOVIE_ID_COLNAME}, {RATING_COLNAME} FROM (
-                SELECT 
-                    {USER_ID_COLNAME}, {MOVIE_ID_COLNAME}, {RATING_COLNAME},
-                    ROW_NUMBER() OVER () - 1 AS row_number
-                FROM {ratingstablename}
-            ) AS sub
-            WHERE MOD(row_number, {numberofpatitrions}) = {i};
-        """)
-
-        # Thực hiện chèn dữ liệu vào phân mảnh thứ i theo từng batch 10000 bản ghi một.
-        rows = cur.fetchall()
-
-        # Câu lệnh insert gốc
-        sql_insert = f"""
-            INSERT INTO {RROBIN_TABLE_PREFIX}{i} ({USER_ID_COLNAME}, {MOVIE_ID_COLNAME}, {RATING_COLNAME}) VALUES """
-
-        count = 0
-        for row in rows:
-            sql_insert += f" ({row[0]}, {row[1]}, {row[2]})"
-            count += 1
-            # Nếu đã đủ 10000 bản ghi thì thực hiện chèn vào cơ sở dữ liệu.
-            if count == 10000:
-                cur.execute(sql_insert + ";")
-                count = 0
-                sql_insert = f"""
-                    INSERT INTO {RROBIN_TABLE_PREFIX}{i} ({USER_ID_COLNAME}, {MOVIE_ID_COLNAME}, {RATING_COLNAME}) VALUES"""
-            else:
-                sql_insert += ","
-
-        if count > 0:
-            sql_insert = sql_insert.rstrip(",")
-            cur.execute(sql_insert + ";")
-
-    cur.close()
+        """).format(sql.Identifier(part_name)))
     conn.commit()
 
+    query = sql.SQL("""
+        INSERT INTO {} (userid, movieid, rating)
+        SELECT userid, movieid, rating
+        FROM (
+            SELECT userid, movieid, rating,
+                   (ROW_NUMBER() OVER (ORDER BY userid, movieid, rating) - 1) AS rn
+            FROM {}
+        ) AS sub
+        WHERE (sub.rn %% %s) = %s;
+    """).format(
+        sql.Identifier(part_name),
+        sql.Identifier(ratingstablename)
+    )
+    cur.execute(query, (numberofpartitions, i))
+    conn.commit()
 
+    cur.close()
+    conn.close()
+
+
+def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
+    """
+    Tạo numberofpartitions bảng rrobin_part0..rrobin_part{n-1} và
+    phân phối dữ liệu từ ratingstablename bằng round‐robin.
+    Thực hiện song song bằng multiprocessing.
+    """
+    # Tạo (hoặc recreate) sequence rrobin_insert_seq
+    conn_main = openconnection
+    cur_main = conn_main.cursor()
+    cur_main.execute("""
+        SELECT EXISTS (
+          SELECT 1
+            FROM pg_catalog.pg_sequences
+           WHERE sequencename = %s
+        );
+    """, (RROBIN_INSERT_SEQ,))
+    seq_exists = cur_main.fetchone()[0]
+    if seq_exists:
+        cur_main.execute(sql.SQL("DROP SEQUENCE {}").format(sql.Identifier(RROBIN_INSERT_SEQ)))
+        conn_main.commit()
+
+    cur_main.execute(sql.SQL("""
+        CREATE SEQUENCE {} 
+        START 0 
+        MINVALUE 0 
+        MAXVALUE %s 
+        INCREMENT 1 
+        CYCLE;
+    """).format(sql.Identifier(RROBIN_INSERT_SEQ)),
+    (numberofpartitions - 1,))
+    conn_main.commit()
+    cur_main.close()
+
+    # Lấy tham số kết nối
+    dsn_params = openconnection.get_dsn_parameters()
+    conn_info = {
+        'dbname':   dsn_params['dbname'],
+        'user':     dsn_params['user'],
+        'password': DB_PASSWORD,
+        'host':     dsn_params.get('host', 'localhost'),
+        'port':     dsn_params.get('port', '5432')
+    }
+    # **Không đóng openconnection** để testHelper tiếp tục sử dụng.
+
+    args_list = [
+        (i, ratingstablename, numberofpartitions, conn_info)
+        for i in range(numberofpartitions)
+    ]
+
+    start = time.time()
+    num_workers = min(numberofpartitions, mp.cpu_count())
+    with mp.Pool(processes=num_workers) as pool:
+        pool.map(_rrobin_worker, args_list)
+    end = time.time()
+
+    print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds.")
+
+
+# =============================== 5. roundrobininsert ===============================
 def roundrobininsert(ratingstablename, userid, itemid, rating, openconnection):
+    """
+    Chèn mới một record vào bảng rrobin_partX dựa trên sequence rrobin_insert_seq.
+    """
     conn = openconnection
     cur = conn.cursor()
 
-    # Lấy tổng số lượng phẩn mảnh round robin hiện có trong cơ sở dữ liệu.
-    cur.execute("""
-        SELECT COUNT(*) 
-        FROM pg_catalog.pg_tables
-        WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-        AND tablename LIKE %s;
-    """, (RROBIN_TABLE_PREFIX + '%',))
-    partition_number = cur.fetchone()[0]
+    cur.execute(sql.SQL("SELECT nextval(%s)"), (RROBIN_INSERT_SEQ,))
+    idx = cur.fetchone()[0]
+    part_table = f"{RROBIN_TABLE_PREFIX}{idx}"
 
-    # Lấy tổng số lượng bản ghi hiện có từ bảng gốc.
-    total_rows = 0
-
-    # Xác định phân mảnh sẽ chứa bản ghi mới
-    partition_index = total_rows % partition_number
-
-    # Thực hiện chèn bản ghi vào phân mảnh tương ứng.
-    cur.execute(f"""
-        INSERT INTO {RROBIN_TABLE_PREFIX}{partition_index} ({USER_ID_COLNAME}, {MOVIE_ID_COLNAME}, {RATING_COLNAME})
-        VALUES (%s, %s, %s);
-    """, (userid, itemid, rating))
-
-    cur.close()
+    cur.execute(sql.SQL("""
+        INSERT INTO {} (userid, movieid, rating)
+        VALUES (%s, %s, %s)
+    """).format(sql.Identifier(part_table)),
+    (userid, itemid, rating))
     conn.commit()
-
-
-# def rangeinsert(ratingstablename, userid, itemid, rating, openconnection):
-#     """
-#     Function to insert a new row into the main table and specific partition based on range rating.
-#     """
-#     con = openconnection
-#     cur = con.cursor()
-#     RANGE_TABLE_PREFIX = 'range_part'
-#     numberofpartitions = count_partitions(RANGE_TABLE_PREFIX, openconnection)
-#     delta = 5 / numberofpartitions
-#     index = int(rating / delta)
-#     if rating % delta == 0 and index != 0:
-#         index = index - 1
-#     table_name = RANGE_TABLE_PREFIX + str(index)
-#     cur.execute("insert into " + table_name + "(userid, movieid, rating) values (" + str(userid) + "," + str(
-#         itemid) + "," + str(rating) + ");")
-#     cur.close()
-#     con.commit()
-
-def count_partitions(prefix, openconnection):
-    """
-    Function to count the number of tables which have the @prefix in their name somewhere.
-    """
-    con = openconnection
-    cur = con.cursor()
-    cur.execute("select count(*) from pg_stat_user_tables where relname like " + "'" + prefix + "%';")
-    count = cur.fetchone()[0]
     cur.close()
-
-    return count
