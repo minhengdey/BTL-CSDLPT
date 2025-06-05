@@ -140,7 +140,6 @@ def _range_worker(args):
     for _ in range(i):
         min_val += delta
     max_val = min_val + delta
-    print(i, min_val, max_val)
     if (i == numberofpartitions - 1) :
         max_val = 5.0
 
@@ -172,6 +171,11 @@ def rangepartition(ratingstablename, numberofpartitions, openconnection):
     phân chia dữ liệu từ ratingstablename dựa trên rating ∈ [0,5].
     Thực hiện song song bằng multiprocessing.
     """
+
+    with openconnection.cursor() as cur:
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_rating ON {ratingstablename}(rating);")
+        openconnection.commit()
+
     # Lấy tham số kết nối (tham chiếu tới DB) từ openconnection
     dsn_params = openconnection.get_dsn_parameters()
     conn_info = {
@@ -181,7 +185,6 @@ def rangepartition(ratingstablename, numberofpartitions, openconnection):
         'host':     dsn_params.get('host', 'localhost'),
         'port':     dsn_params.get('port', '5432')
     }
-    # **Không đóng openconnection** ở đây, để testHelper có thể tiếp tục sử dụng.
 
     args_list = [
         (i, ratingstablename, numberofpartitions, conn_info)
@@ -211,9 +214,18 @@ def rangeinsert(ratingstablename, userid, itemid, rating, openconnection):
         return
 
     delta = 5.0 / num_parts
-    idx = int(rating / delta)
-    if (rating % delta == 0) and (idx != 0):
-        idx -= 1
+    idx = 0
+    min_val = 0.0
+    for i in range(num_parts):
+        if i == 0:
+            if min_val <= rating <= min_val + delta :
+                idx = i
+                break
+        else :
+            if min_val < rating <= min_val + delta :
+                idx = i
+                break
+        min_val = min_val + delta
     part_table = f"{RANGE_TABLE_PREFIX}{idx}"
 
     cur.execute(sql.SQL("""
