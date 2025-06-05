@@ -64,7 +64,7 @@ def LoadRatings(input_path: str, config_path: str = 'config.ini') -> None:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Load MovieLens ratings into PostgreSQL')
-    parser.add_argument('input_path', help='Đường dẫn tới file ratings.dat')
+    parser.add_argument('--input_path', default='ratings.dat', help='Đường dẫn tới file ratings.dat')
     parser.add_argument('--config', default='config.ini', help='Đường dẫn tới file cấu hình DB')
     args = parser.parse_args()
 

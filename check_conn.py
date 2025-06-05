@@ -1,19 +1,29 @@
 import psycopg2
 from configparser import ConfigParser
 
-def load_db_config(path='config.ini'):
-    cfg = ConfigParser()
-    cfg.read(path)
-    pg = cfg['postgres']
-    return {
-        'host': pg['host'],
-        'port': pg.getint('port'),
-        'dbname': pg['dbname'],
-        'user': pg['user'],
-        'password': pg['password'],
-    }
+DATABASE_NAME = 'dds_assgn1'
+
+def getopenconnection(user='postgres', password='minhanh2722004', dbname='postgres',
+                      host='localhost', port=5432):
+    print(dbname)
+    return psycopg2.connect(
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=user,
+        password=password
+    )
 
 if __name__ == '__main__':
-    conn = psycopg2.connect(**load_db_config())
-    print("✅ Kết nối thành công với PostgreSQL!")
-    conn.close()
+    conn = None
+    try:
+        conn = getopenconnection(dbname=DATABASE_NAME)
+        print("✅ Kết nối thành công với PostgreSQL!")
+    except Exception as e:
+        print(f"❌ Kết nối thất bại: {e}")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
