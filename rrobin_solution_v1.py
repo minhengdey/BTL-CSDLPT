@@ -5,6 +5,7 @@ import csv
 import time
 from psycopg2 import sql
 from psycopg2.extras import execute_batch
+import phong_solution as Interface
 
 # =============================== CẤU HÌNH CHUNG ===============================
 BATCH_SIZE               = 100000
@@ -15,84 +16,9 @@ INPUT_FILE_PATH          = 'ratings.dat'
 # **Điền password Postgres của bạn ở đây** (phải khớp với testHelper.getopenconnection)
 DB_PASSWORD              = '123456'
 
-def _preprocess_raw_to_csv(raw_path, csv_path):
-    """
-    Đọc file raw (delimiter='::'), ghi ra CSV (delimiter=',') chỉ giữ 3 cột đầu:
-    userid, movieid, rating.
-    """
-    with open(raw_path, 'r', encoding='utf-8') as fin, \
-         open(csv_path, 'w', encoding='utf-8', newline='') as fout:
-        writer = csv.writer(fout)
-        for line in fin:
-            parts = line.strip().split("::")
-            if len(parts) < 3:
-                continue
-            writer.writerow([parts[0], parts[1], parts[2]])
-
-
-def _count_partitions(prefix, openconnection):
-    """
-    Đếm số bảng có tên giống prefix + '%'.
-    """
-    cur = openconnection.cursor()
-    cur.execute("""
-        SELECT COUNT(*)
-          FROM pg_catalog.pg_tables
-         WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-           AND tablename LIKE %s;
-    """, (prefix + '%',))
-    cnt = cur.fetchone()[0]
-    cur.close()
-    return cnt
-
 
 def loadratings(ratingstablename, ratingsfilepath, openconnection):
-    """
-    Tạo table ratingstablename (userid INT, movieid INT, rating REAL),
-    sau đó bulk‐load (~10M rows) với COPY. Dữ liệu gốc ở ratingsfilepath
-    có delimiter '::'; ta sẽ chuyển thành CSV tạm rồi COPY.
-    """
-    conn = openconnection
-    cur = conn.cursor()
-    temp_csv = ratingstablename + '_temp.csv'
-
-    start = time.time()
-
-    # 1) Nếu đã có table thì DROP (để testHelper tạo lại clean)
-    cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(ratingstablename)))
-    conn.commit()
-
-    # 2) Tạo table mới
-    cur.execute(sql.SQL("""
-        CREATE TABLE {} (
-            userid  INTEGER NOT NULL,
-            movieid INTEGER NOT NULL,
-            rating  REAL    NOT NULL
-        );
-    """).format(sql.Identifier(ratingstablename)))
-    conn.commit()
-
-    # 3) Preprocess raw '::' → CSV
-    _preprocess_raw_to_csv(ratingsfilepath, temp_csv)
-
-    # 4) COPY từ CSV vào table
-    with open(temp_csv, 'r', encoding='utf-8') as f:
-        cur.copy_expert(
-            sql=f"COPY {ratingstablename}(userid, movieid, rating) FROM STDIN WITH (FORMAT csv)",
-            file=f
-        )
-    conn.commit()
-
-    # 5) Xóa file tạm
-    try:
-        os.remove(temp_csv)
-    except OSError:
-        pass
-
-    end = time.time()
-    print(f"[loadratings] Completed in {end - start:.2f} seconds.")
-
-    cur.close()
+    Interface.loadratings(ratingstablename, ratingsfilepath, openconnection)
 
 
 # =============================== 1. round robin partition ===============================
