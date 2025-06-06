@@ -1,4 +1,4 @@
-# RRobin Partition.
+# Round Robin Partition.
 ## V1 Naive Approach
 - Thực hiện truy vấn theo kiểu đơn giản.
 - Các bước thực hiện.
@@ -21,6 +21,7 @@
 
 
     - Từ các hàng đã được lọc sẽ được chèn thêm vào phân mảnh
+    - Thực hiện lặp lại như vậy cho đến hết các phân mảnh.
 
 - Bổ sung:
   - Ngoài ra đối với bảng gốc 10 000 000 bản ghi và chia thành 5 phân mảnh.
@@ -99,4 +100,66 @@ def batchinsert(tableName, columnTuples, dataTuples, batchSize, insertcur):
 - Kết quả:
   - Với bảng gốc 10 triệu bản ghi, chia thành 100 phần mảnh, thời gian còn khoảng 27s.
   - Với bảng gốc 10 triệu bản ghi, chia thành 5 phân mảnh, thời gian cũng tương tự, khoảng 27s.
+
+## V3 Optimize Insert
+
+- Do các bản ghi thực hiện insert vào các phân mảnh độc lập với nhau
+  - => Có thể thực hiện song song hóa việc chèn mà không bị conflict với nhau
+- Triển khai
+  - Triển khai hàm _batchinsert_worker để mở một connect riêng đến phân mảnh tương ứng và thực hiện chèn.
+```python
+def _batchinsert_worker(args):
+    """
+    Worker cho mỗi partition:
+    args = (tableName, columnTuples, dataTuples, batchSize, conn_params)
+    """
+    tableName, columnTuples, dataTuples, batchSize, conn_params = args
+
+    # Mỗi tiến trình con tự mở connection riềng bằng conn_params
+    conn = psycopg2.connect(**conn_params)
+    cur = conn.cursor()
+
+    for i in range(0, len(dataTuples), batchSize):
+        batch = dataTuples[i : i + batchSize]
+        batchinsert(tableName, columnTuples, batch, batchSize, cur)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+```
+
+  - Triển khai trong hàm rrobinpartition chính:
+    - Thực hiện tạo một list các task ứng với mỗi phân mảnh.
+    - Tạo pool để thực hiện song song cho các task vừa tạo.
+
+```python
+    # 3. Tạo tasks cho mỗi partition (truyền conn_params (thông số của connection))
+    conn_params = conn.get_dsn_parameters()
+    conn_params['password'] = DB_PASSWORD  
+    tasks = []
+    for i in range(numberofpartitions):
+        dataTuples = tuple_inserts[i]
+        if not dataTuples:
+            continue
+
+        tableName = f"{RROBIN_TABLE_PREFIX}{i}"
+        columnTuples = ('userid', 'movieid', 'rating')
+        tasks.append((tableName, columnTuples, dataTuples, BATCH_SIZE, conn_params))
+
+    # 4. Chạy song song với Pool
+    pool = Pool(processes=len(tasks))
+    pool.map(_batchinsert_worker, tasks)
+    pool.close()
+    pool.join()
+    
+    end = time.time()
+
+    print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds. ")
+```
+
+- Kết quả: tự làm nốt nhé, làm lại cả mấy cái trên nữa.
+
+
+
+
 
