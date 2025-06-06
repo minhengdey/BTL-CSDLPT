@@ -108,89 +108,42 @@ from multiprocessing import Pool
 #   BATCH_SIZE: kích thước mỗi lần batch insert (ví dụ 1000)
 #   COLUMNS = ('userid', 'movieid', 'rating')
 
-def _batchinsert_worker(args):
-    """
-    Worker cho mỗi partition:
-    args = (tableName, columnTuples, dataTuples, batchSize, conn_params)
-    """
-    tableName, columnTuples, dataTuples, batchSize, conn_params = args
-
-    # Mỗi tiến trình con tự mở connection riềng bằng conn_params
-    conn = psycopg2.connect(**conn_params)
-    cur = conn.cursor()
-
-    for i in range(0, len(dataTuples), batchSize):
-        batch = dataTuples[i : i + batchSize]
-        batchinsert(tableName, columnTuples, batch, batchSize, cur)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
-    """
-    Phân chia theo Round-Robin và chèn song song cho mỗi partition.
-    openconnection: psycopg2 connection đã mở
-    conn_params: dict chứa { 'dbname', 'user', 'password', 'host', 'port' }
-    """
+def roundrobinpartition(ratingstablename, number_of_partitions, openconnection):
+    start = time.time()
     conn = openconnection
     cur = conn.cursor()
-    start = time.time()
-
-    # 1. Tạo (hoặc xóa rồi tạo) các bảng partition
-    for i in range(numberofpartitions):
-        tbl = f"{RROBIN_TABLE_PREFIX}{i}"
-        cur.execute(f"DROP TABLE IF EXISTS {tbl};")
+    
+    for i in range(number_of_partitions):
+        # Tạo phân mảnh thứ i.
         cur.execute(f"""
-            CREATE TABLE {tbl} (
-                userid  INTEGER,
+            CREATE TABLE {RROBIN_TABLE_PREFIX}{i} (
+                userid INTEGER,
                 movieid INTEGER,
-                rating  REAL
+                rating FLOAT
             );
         """)
-
-    # 2. Đọc toàn bộ dữ liệu từ bảng gốc theo batch
-    cur.execute(f"SELECT userid, movieid, rating FROM {ratingstablename};")
-    row_index = 0
-    batch = cur.fetchmany(BATCH_SIZE)
-
-    # Khởi tạo list để gom dữ liệu cho từng partition
-    tuple_inserts = [[] for _ in range(numberofpartitions)]
+        
+        # Lấy các bản ghi từ bảng gốc ứng với phân mảnh thứ i
+        cur.execute(f"""
+            SELECT userid, movieid, rating FROM (
+                SELECT 
+                    userid, movieid, rating,
+                    ROW_NUMBER() OVER (ORDER BY userid, movieid) - 1 AS row_number
+                FROM {ratingstablename}
+            ) AS sub
+            WHERE MOD(row_number, {number_of_partitions}) = {i};
+        """)
+        
+        # Thực hiện chèn dữ liệu vào phân mảnh thứ i theo từng batch 10000 bản ghi một.
+        rows = cur.fetchall()
     
-    # Duyệt qua từng batch và phân phối dữ liệu vào các partition
-    while batch:
-        for row in batch:
-            # Phân phối từng row vào từng partition theo round-robin
-            part_index = row_index % numberofpartitions
-            tuple_inserts[part_index].append((row[0], row[1], row[2]))
-            row_index += 1
-        batch = cur.fetchmany(BATCH_SIZE)
-    cur.close()
-    conn.commit()
-
-
-    # 3. Tạo tasks cho mỗi partition (truyền conn_params (thông số của connection))
-    conn_params = conn.get_dsn_parameters()
-    conn_params['password'] = DB_PASSWORD  
-    tasks = []
-    for i in range(numberofpartitions):
-        dataTuples = tuple_inserts[i]
-        if not dataTuples:
-            continue
-
-        tableName = f"{RROBIN_TABLE_PREFIX}{i}"
-        columnTuples = ('userid', 'movieid', 'rating')
-        tasks.append((tableName, columnTuples, dataTuples, BATCH_SIZE, conn_params))
-
-    # 4. Chạy song song với Pool
-    pool = Pool(processes=len(tasks))
-    pool.map(_batchinsert_worker, tasks)
-    pool.close()
-    pool.join()
+        batchinsert(RROBIN_TABLE_PREFIX + str(i), ('userid', 'movieid', 'rating'), rows, BATCH_SIZE, cur)
+            
     
     end = time.time()
-
-    print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds. ")
+    print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds.")
+    cur.close()
+    conn.commit()
     
     
 def batchinsert(tableName, columnTuples, dataTuples, batchSize, insertcur):

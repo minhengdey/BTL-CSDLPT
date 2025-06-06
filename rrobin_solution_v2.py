@@ -7,7 +7,7 @@ from psycopg2 import sql
 from psycopg2.extras import execute_batch
 
 # =============================== CẤU HÌNH CHUNG ===============================
-BATCH_SIZE               = 100000
+BATCH_SIZE               = 10000000
 RANGE_TABLE_PREFIX       = 'range_part'
 RROBIN_TABLE_PREFIX      = 'rrobin_part'
 INPUT_FILE_PATH          = 'ratings.dat'
@@ -96,51 +96,24 @@ def loadratings(ratingstablename, ratingsfilepath, openconnection):
 
 
 # =============================== 1. round robin partition ===============================
-
-
-
 import time
-import psycopg2
-from multiprocessing import Pool
 
-# Giả sử các biến toàn cục sau đã được định nghĩa:
-#   RROBIN_TABLE_PREFIX: prefix cho tên bảng partition (ví dụ "rrobin_part_")
-#   BATCH_SIZE: kích thước mỗi lần batch insert (ví dụ 1000)
-#   COLUMNS = ('userid', 'movieid', 'rating')
 
-def _batchinsert_worker(args):
-    """
-    Worker cho mỗi partition:
-    args = (tableName, columnTuples, dataTuples, batchSize, conn_params)
-    """
-    tableName, columnTuples, dataTuples, batchSize, conn_params = args
-
-    # Mỗi tiến trình con tự mở connection riềng bằng conn_params
-    conn = psycopg2.connect(**conn_params)
-    cur = conn.cursor()
-
-    for i in range(0, len(dataTuples), batchSize):
-        batch = dataTuples[i : i + batchSize]
-        batchinsert(tableName, columnTuples, batch, batchSize, cur)
-
-    conn.commit()
-    cur.close()
-    conn.close()
 
 def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
     """
-    Phân chia theo Round-Robin và chèn song song cho mỗi partition.
-    openconnection: psycopg2 connection đã mở
-    conn_params: dict chứa { 'dbname', 'user', 'password', 'host', 'port' }
+    Phân chia theo Round-Robin: bản ghi i sẽ vào partition (i % numberofpartitions).
+    Tạo numberofpartitions table với tên: RROBIN_TABLE_PREFIX + idx.
+    Giả sử các table partition chưa tồn tại, nếu đã có, ta sẽ xóa sạch trước.
     """
     conn = openconnection
     cur = conn.cursor()
+    insert_cur = conn.cursor()
     start = time.time()
 
-    # 1. Tạo (hoặc xóa rồi tạo) các bảng partition
+    # 1. Xoá (nếu có) và tạo mới các table partition
     for i in range(numberofpartitions):
         tbl = f"{RROBIN_TABLE_PREFIX}{i}"
-        cur.execute(f"DROP TABLE IF EXISTS {tbl};")
         cur.execute(f"""
             CREATE TABLE {tbl} (
                 userid  INTEGER,
@@ -149,50 +122,46 @@ def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
             );
         """)
 
-    # 2. Đọc toàn bộ dữ liệu từ bảng gốc theo batch
+    # 2. Lấy tổng số bản ghi (tuỳ chọn, chỉ để in log)
+    cur.execute(f"SELECT COUNT(*) FROM {ratingstablename};")
+    total_rows = cur.fetchone()[0]
+
+    # 3. Lấy lần lượt theo batch và chèn vào partition thích hợp
+    #    Sử dụng i_row để tính index partition: part_index = i_row % numberofpartitions
     cur.execute(f"SELECT userid, movieid, rating FROM {ratingstablename};")
     row_index = 0
     batch = cur.fetchmany(BATCH_SIZE)
-
-    # Khởi tạo list để gom dữ liệu cho từng partition
-    tuple_inserts = [[] for _ in range(numberofpartitions)]
     
-    # Duyệt qua từng batch và phân phối dữ liệu vào các partition
+    
+    tuple_inserts = [[] for _ in range(numberofpartitions)]
+
     while batch:
+        # Tập hợp các hàng cho từng partition trong batch này
+        # Tạo dict mapping part_index -> list of rows
+
         for row in batch:
-            # Phân phối từng row vào từng partition theo round-robin
             part_index = row_index % numberofpartitions
             tuple_inserts[part_index].append((row[0], row[1], row[2]))
             row_index += 1
+ 
+
+        # Đọc batch tiếp
         batch = cur.fetchmany(BATCH_SIZE)
-    cur.close()
-    conn.commit()
-
-
-    # 3. Tạo tasks cho mỗi partition (truyền conn_params (thông số của connection))
-    conn_params = conn.get_dsn_parameters()
-    conn_params['password'] = DB_PASSWORD  
-    tasks = []
     for i in range(numberofpartitions):
-        dataTuples = tuple_inserts[i]
-        if not dataTuples:
-            continue
+        if(tuple_inserts[i]):
+            batchinsert(f"{RROBIN_TABLE_PREFIX}{i}",
+                       ('userid', 'movieid', 'rating'),
+                       tuple_inserts[i],
+                       BATCH_SIZE, insert_cur)
+    # 4. Commit và đóng cursor
+    conn.commit()
+    cur.close()
+    insert_cur.close()
 
-        tableName = f"{RROBIN_TABLE_PREFIX}{i}"
-        columnTuples = ('userid', 'movieid', 'rating')
-        tasks.append((tableName, columnTuples, dataTuples, BATCH_SIZE, conn_params))
-
-    # 4. Chạy song song với Pool
-    pool = Pool(processes=len(tasks))
-    pool.map(_batchinsert_worker, tasks)
-    pool.close()
-    pool.join()
-    
     end = time.time()
+    print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds. "
+          f"Total rows processed: {total_rows}")
 
-    print(f"[roundrobinpartition] Completed in {end - start:.2f} seconds. ")
-    
-    
 def batchinsert(tableName, columnTuples, dataTuples, batchSize, insertcur):
     for i in range(0, len(dataTuples), batchSize):
         batch = dataTuples[i:min(i + batchSize, len(dataTuples))]
