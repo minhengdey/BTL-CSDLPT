@@ -36,7 +36,7 @@ if __name__ == '__main__':
             testHelper.deleteAllPublicTables(conn)
             MyAssignment.loadratings(RATINGS_TABLE, INPUT_FILE_PATH, conn)
 
-            [result, e] = testHelper.testroundrobinpartition(MyAssignment, RATINGS_TABLE, 100, conn, 0, ACTUAL_ROWS_IN_INPUT_FILE)
+            [result, e] = testHelper.testroundrobinpartition(MyAssignment, RATINGS_TABLE, 5, conn, 0, ACTUAL_ROWS_IN_INPUT_FILE)
             if result :
                 print("roundrobinpartition function pass!")
             else:

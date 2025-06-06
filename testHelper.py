@@ -51,7 +51,7 @@ def deleteAllPublicTables(openconnection):
 
     cur.close()
 
-def getopenconnection(user='postgres', password='minhanh2722004', dbname='dds_assgn1'):
+def getopenconnection(user='postgres', password='123456', dbname='dds_assgn1'):
     return psycopg2.connect("dbname='" + dbname + "' user='" + user + "' host='localhost' password='" + password + "'")
 
 
