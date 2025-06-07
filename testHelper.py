@@ -51,7 +51,7 @@ def deleteAllPublicTables(openconnection):
 
     cur.close()
 
-def getopenconnection(user='postgres', password='phonggda123', dbname='dds_assgn1'):
+def getopenconnection(user='postgres', password='minhanh2722004', dbname='dds_assgn1'):
     return psycopg2.connect("dbname='" + dbname + "' user='" + user + "' host='localhost' password='" + password + "'")
 
 
@@ -72,8 +72,6 @@ def getCountrangepartition(ratingstablename, numberofpartitions, openconnection)
 
     lowerbound = interval
     for i in range(1, numberofpartitions):
-        if i == numberofpartitions - 1 :
-            lowerbound = 4.99
         cur.execute("select count(*) from {0} where rating > {1} and rating <= {2}".format(ratingstablename,
                                                                                           lowerbound,
                                                                                           lowerbound + interval))

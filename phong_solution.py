@@ -4,7 +4,7 @@ import os
 import csv
 import time
 import psycopg2
-from psycopg2 import sql, extras
+from psycopg2 import sql
 import multiprocessing as mp
 
 # =============================== CẤU HÌNH CHUNG ===============================
@@ -12,10 +12,10 @@ BATCH_SIZE               = 10000
 RANGE_TABLE_PREFIX       = 'range_part'
 RROBIN_TABLE_PREFIX      = 'rrobin_part'
 RROBIN_INSERT_SEQ        = 'rrobin_insert_seq'
-INPUT_FILE_PATH          = 'test_data.dat'
+INPUT_FILE_PATH          = 'ratings.dat'
 
 # **Điền password Postgres của bạn ở đây** (phải khớp với testHelper.getopenconnection)
-DB_PASSWORD              = 'phonggda123'
+DB_PASSWORD              = 'minhanh2722004'
 
 
 # =============================== HÀM TIỆN ÍCH CHUNG ===============================
@@ -141,19 +141,22 @@ def _range_worker(args):
         if not batch:
             break
 
-        extras.execute_values(
-            write_cur,
-            sql.SQL("INSERT INTO {} (userid, movieid, rating) VALUES %s")
-            .format(sql.Identifier(part_name)),
-            batch
-        )
+        batchinsert(part_name, ['userid', 'movieid', 'rating'], batch, BATCH_SIZE, write_cur)
 
     conn.commit()
     read_cur.close()
     write_cur.close()
     conn.close()
 
-
+def batchinsert(tableName, columnTuples, dataTuples, batchSize, insertcur):
+    for i in range(0, len(dataTuples), batchSize):
+        batch = dataTuples[i:min(i + batchSize, len(dataTuples))]
+        values_str = ", ".join(
+            "(" + ", ".join(map(str, row)) + ")"
+            for row in batch)
+        insert_query = f"""INSERT INTO {tableName} ({', '.join(columnTuples)}) 
+                           VALUES {values_str} """
+        insertcur.execute(insert_query)
 
 def rangepartition(ratingstablename, numberofpartitions, openconnection):
     """
@@ -197,7 +200,7 @@ def rangepartition(ratingstablename, numberofpartitions, openconnection):
     ]
 
     start = time.time()
-    num_workers = min(numberofpartitions, mp.cpu_count())
+    num_workers = mp.cpu_count()
     with mp.Pool(processes=num_workers) as pool:
         pool.map(_range_worker, args_list)
     end = time.time()
