@@ -3,7 +3,7 @@ from configparser import ConfigParser
 
 DATABASE_NAME = 'dds_assgn1'
 
-def getopenconnection(user='postgres', password='minhanh2722004', dbname='postgres',
+def getopenconnection(user='postgres', password='phonggda123', dbname='postgres',
                       host='localhost', port=5432):
     print(dbname)
     return psycopg2.connect(

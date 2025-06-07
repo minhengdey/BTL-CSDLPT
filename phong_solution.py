@@ -4,7 +4,7 @@ import os
 import csv
 import time
 import psycopg2
-from psycopg2 import sql
+from psycopg2 import sql, extras
 import multiprocessing as mp
 
 # =============================== CẤU HÌNH CHUNG ===============================
@@ -12,10 +12,10 @@ BATCH_SIZE               = 10000
 RANGE_TABLE_PREFIX       = 'range_part'
 RROBIN_TABLE_PREFIX      = 'rrobin_part'
 RROBIN_INSERT_SEQ        = 'rrobin_insert_seq'
-INPUT_FILE_PATH          = 'ratings.dat'
+INPUT_FILE_PATH          = 'test_data.dat'
 
 # **Điền password Postgres của bạn ở đây** (phải khớp với testHelper.getopenconnection)
-DB_PASSWORD              = 'minhanh2722004'
+DB_PASSWORD              = 'phonggda123'
 
 
 # =============================== HÀM TIỆN ÍCH CHUNG ===============================
@@ -109,38 +109,29 @@ def _range_worker(args):
     """
     i, ratingstablename, numberofpartitions, conn_info = args
     conn = psycopg2.connect(**conn_info)
-    cur = conn.cursor()
+
+    # Con trỏ để tạo bảng
+    setup_cur = conn.cursor()
 
     part_name = f"{RANGE_TABLE_PREFIX}{i}"
-    # Tạo hoặc TRUNCATE
-    cur.execute("""
-        SELECT EXISTS (
-          SELECT 1
-            FROM pg_catalog.pg_tables
-           WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-             AND tablename = %s
+    setup_cur.execute(f"DROP TABLE IF EXISTS {part_name};")
+    setup_cur.execute(f"""
+        CREATE TABLE {part_name} (
+            userid  INTEGER,
+            movieid INTEGER,
+            rating  REAL
         );
-    """, (part_name,))
-    exists = cur.fetchone()[0]
-    if exists:
-        cur.execute(sql.SQL("TRUNCATE TABLE {}").format(sql.Identifier(part_name)))
-    else:
-        cur.execute(sql.SQL("""
-            CREATE TABLE {} (
-                userid  INTEGER,
-                movieid INTEGER,
-                rating  REAL
-            );
-        """).format(sql.Identifier(part_name)))
+    """)
     conn.commit()
+    setup_cur.close()
 
-    # Tính khoảng giá trị
+    # Tính khoảng rating
     delta = 5.0 / numberofpartitions
     min_val = 0.0
     for _ in range(i):
         min_val += delta
     max_val = min_val + delta
-    if (i == numberofpartitions - 1) :
+    if (i == numberofpartitions - 1):
         max_val = 5.0
 
     if i == 0:
@@ -148,22 +139,52 @@ def _range_worker(args):
     else:
         where_clause = "rating > %s AND rating <= %s"
 
-    query = sql.SQL("""
-        INSERT INTO {} (userid, movieid, rating)
-        SELECT userid, movieid, rating
-          FROM {}
-         WHERE {}
-    """).format(
-        sql.Identifier(part_name),
-        sql.Identifier(ratingstablename),
-        sql.SQL(where_clause)
+    # Con trỏ đọc SELECT
+    read_cur = conn.cursor()
+    read_cur.execute(
+        sql.SQL("SELECT userid, movieid, rating FROM {} WHERE " + where_clause)
+        .format(sql.Identifier(ratingstablename)),
+        (min_val, max_val)
     )
-    cur.execute(query, (min_val, max_val))
-    conn.commit()
 
-    cur.close()
+    # Con trỏ ghi INSERT
+    write_cur = conn.cursor()
+
+    while True:
+        batch = read_cur.fetchmany(BATCH_SIZE)
+        if not batch:
+            break
+
+        extras.execute_values(
+            write_cur,
+            sql.SQL("INSERT INTO {} (userid, movieid, rating) VALUES %s")
+            .format(sql.Identifier(part_name)),
+            batch
+        )
+
+    conn.commit()
+    read_cur.close()
+    write_cur.close()
     conn.close()
 
+def _batchinsert_worker(args):
+    """
+    Worker cho mỗi partition:
+    args = (tableName, columnTuples, dataTuples, batchSize, conn_params)
+    """
+    tableName, columnTuples, dataTuples, batchSize, conn_params = args
+
+    # Mỗi tiến trình con tự mở connection riềng bằng conn_params
+    conn = psycopg2.connect(**conn_params)
+    cur = conn.cursor()
+
+    for i in range(0, len(dataTuples), batchSize):
+        batch = dataTuples[i : i + batchSize]
+        batchinsert(tableName, columnTuples, batch, batchSize, cur)
+
+    conn.commit()
+    cur.close()
+    conn.close()
 
 def rangepartition(ratingstablename, numberofpartitions, openconnection):
     """
@@ -177,28 +198,89 @@ def rangepartition(ratingstablename, numberofpartitions, openconnection):
         openconnection.commit()
 
     # Lấy tham số kết nối (tham chiếu tới DB) từ openconnection
-    dsn_params = openconnection.get_dsn_parameters()
-    conn_info = {
-        'dbname':   dsn_params['dbname'],
-        'user':     dsn_params['user'],
-        'password': DB_PASSWORD,
-        'host':     dsn_params.get('host', 'localhost'),
-        'port':     dsn_params.get('port', '5432')
-    }
+    # dsn_params = openconnection.get_dsn_parameters()
+    # conn_info = {
+    #     'dbname':   dsn_params['dbname'],
+    #     'user':     dsn_params['user'],
+    #     'password': DB_PASSWORD,
+    #     'host':     dsn_params.get('host', 'localhost'),
+    #     'port':     dsn_params.get('port', '5432')
+    # }
+    #
+    # args_list = [
+    #     (i, ratingstablename, numberofpartitions, conn_info)
+    #     for i in range(numberofpartitions)
+    # ]
 
-    args_list = [
-        (i, ratingstablename, numberofpartitions, conn_info)
-        for i in range(numberofpartitions)
-    ]
-
+    conn = openconnection
+    cur = conn.cursor()
     start = time.time()
+    delta = 5.0 / numberofpartitions
+    min_value = 0.0
+    tuple_inserts = [[] for _ in range(numberofpartitions)]
+
+    # 1. Tạo (hoặc xóa rồi tạo) các bảng partition
+    for i in range(numberofpartitions):
+        tbl = f"{RANGE_TABLE_PREFIX}{i}"
+        cur.execute(f"DROP TABLE IF EXISTS {tbl};")
+        cur.execute(f"""
+                CREATE TABLE {tbl} (
+                    userid  INTEGER,
+                    movieid INTEGER,
+                    rating  REAL
+                );
+            """)
+        conn.commit()
+
+        if i == 0:
+            where_clause = "rating >= %s AND rating <= %s"
+        else:
+            where_clause = "rating > %s AND rating <= %s"
+
+        max_value = min_value + delta
+        if (i == numberofpartitions - 1):
+            max_value = 5.0
+        cur.execute(
+            sql.SQL("SELECT userid, movieid, rating FROM {} WHERE " + where_clause)
+            .format(sql.Identifier(ratingstablename)),
+            (min_value, max_value)
+        )
+        batch = cur.fetchmany(BATCH_SIZE)
+
+        while batch:
+            for row in batch:
+                tuple_inserts[i].append((row[0], row[1], row[2]))
+            batch = cur.fetchmany(BATCH_SIZE)
+        min_value += delta
+
+    conn_params = conn.get_dsn_parameters()
+    conn_params['password'] = DB_PASSWORD
+    tasks = []
+    for i in range(numberofpartitions):
+        dataTuples = tuple_inserts[i]
+        if not dataTuples:
+            continue
+
+        tableName = f"{RANGE_TABLE_PREFIX}{i}"
+        columnTuples = ('userid', 'movieid', 'rating')
+        tasks.append((tableName, columnTuples, dataTuples, BATCH_SIZE, conn_params))
+
     num_workers = min(numberofpartitions, mp.cpu_count())
     with mp.Pool(processes=num_workers) as pool:
-        pool.map(_range_worker, args_list)
+        pool.map(_batchinsert_worker, tasks)
     end = time.time()
 
     print(f"[rangepartition] Completed in {end - start:.2f} seconds.")
 
+def batchinsert(tableName, columnTuples, dataTuples, batchSize, insertcur):
+    for i in range(0, len(dataTuples), batchSize):
+        batch = dataTuples[i:min(i + batchSize, len(dataTuples))]
+        values_str = ", ".join(
+            "(" + ", ".join(map(str, row)) + ")"
+            for row in batch)
+        insert_query = f"""INSERT INTO {tableName} ({', '.join(columnTuples)}) 
+                           VALUES {values_str} """
+        insertcur.execute(insert_query)
 
 # =============================== 3. rangeinsert ===============================
 def rangeinsert(ratingstablename, userid, itemid, rating, openconnection):
