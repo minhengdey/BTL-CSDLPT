@@ -1,5 +1,4 @@
 # Môi trường ảo
-venv/
 .venv/
 
 __pycache__/
@@ -8,11 +7,8 @@ __pycache__/
 .idea
 
 # File dữ liệu lớn
-ratings.dat
 test_data.dat
-
-# File cấu hình thực tế (nếu chứa thông tin nhạy cảm)
-config.ini
+test_data_10m.dat
 
 
 # Các file hệ thống/macOS/Windows có thể thêm tùy
